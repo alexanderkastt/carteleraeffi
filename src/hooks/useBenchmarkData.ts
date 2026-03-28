@@ -1,10 +1,47 @@
 import { useState, useEffect, useCallback } from 'react';
 import { BenchmarkData, CellValue, carriersByCountry, fields, normalizeCellValue } from '@/lib/data';
+import { supabase } from '@/integrations/supabase/client';
 
 const STORAGE_KEY = 'efficommerce_benchmark_data';
 
 interface StoredData {
   [key: string]: BenchmarkData; // key format: "country_year_month"
+}
+
+// Hydrate localStorage from Supabase saved_reports if local data is missing or empty
+async function hydrateFromSupabase(): Promise<boolean> {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    const existing: StoredData = stored ? JSON.parse(stored) : {};
+
+    // Check if any period has real data (not just empty defaults)
+    const hasRealData = Object.values(existing).some(periodData =>
+      Object.values(periodData).some(carrier =>
+        Object.values(carrier).some(cell => {
+          const val = (cell as CellValue).value;
+          return val !== '' && val !== false && val !== 0;
+        })
+      )
+    );
+
+    if (hasRealData) return false;
+
+    const { data: reports, error } = await supabase
+      .from('saved_reports')
+      .select('country, year, month, data');
+    if (error || !reports || reports.length === 0) return false;
+
+    const allData: StoredData = {};
+    reports.forEach((r: any) => {
+      allData[`${r.country}_${r.year}_${r.month}`] = r.data as BenchmarkData;
+    });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(allData));
+    console.log(`Hydrated ${reports.length} periods from Supabase`);
+    return true;
+  } catch (e) {
+    console.error('Hydrate error:', e);
+    return false;
+  }
 }
 
 export function useBenchmarkData(country: string, year: number, month: number) {
@@ -13,34 +50,36 @@ export function useBenchmarkData(country: string, year: number, month: number) {
 
   const storageKey = `${country}_${year}_${month}`;
 
-  // Load data from localStorage
+  // Load data from localStorage, hydrate from Supabase if needed
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const allData: StoredData = JSON.parse(stored);
-        if (allData[storageKey]) {
-          // Normalize all values to CellValue format
-          const loadedData = allData[storageKey];
-          const normalizedData: BenchmarkData = {};
-          Object.keys(loadedData).forEach(carrier => {
-            normalizedData[carrier] = {};
-            Object.keys(loadedData[carrier]).forEach(fieldId => {
-              normalizedData[carrier][fieldId] = normalizeCellValue(loadedData[carrier][fieldId]);
+    async function loadData() {
+      await hydrateFromSupabase();
+      try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          const allData: StoredData = JSON.parse(stored);
+          if (allData[storageKey]) {
+            const loadedData = allData[storageKey];
+            const normalizedData: BenchmarkData = {};
+            Object.keys(loadedData).forEach(carrier => {
+              normalizedData[carrier] = {};
+              Object.keys(loadedData[carrier]).forEach(fieldId => {
+                normalizedData[carrier][fieldId] = normalizeCellValue(loadedData[carrier][fieldId]);
+              });
             });
-          });
-          setData(normalizedData);
+            setData(normalizedData);
+          } else {
+            initializeData();
+          }
         } else {
-          // Initialize empty data structure for carriers
           initializeData();
         }
-      } else {
+      } catch (error) {
+        console.error('Error loading benchmark data:', error);
         initializeData();
       }
-    } catch (error) {
-      console.error('Error loading benchmark data:', error);
-      initializeData();
     }
+    loadData();
   }, [country, year, month, storageKey]);
 
   const initializeData = () => {
